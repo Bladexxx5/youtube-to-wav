@@ -674,7 +674,7 @@
 
 <script>
   // ── CONFIG ──────────────────────────────────────────────
-  const API_BASE = 'http://localhost:5000'; // Python backend
+  const API_BASE = window.location.origin; // mismo servidor (local y producción)
 
   // ── UTILS ───────────────────────────────────────────────
   function $(id) { return document.getElementById(id); }
