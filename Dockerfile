@@ -21,5 +21,5 @@ RUN mkdir -p downloads
 # Puerto (Railway usa la variable PORT)
 EXPOSE 5000
 
-# Arrancar la app
-CMD ["python", "app.py"]
+# Arrancar la app con gunicorn (en modo shell para que expanda $PORT)
+CMD gunicorn app:app --bind 0.0.0.0:$PORT --timeout 300 --workers 2
