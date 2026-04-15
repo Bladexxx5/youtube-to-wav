@@ -505,9 +505,9 @@
 
   <!-- Badges -->
   <div class="badge-row">
-    <span class="badge badge-red">
-      <span class="dot"></span>
-      Servidor activo
+    <span class="badge" id="status-badge">
+      <span class="dot" id="status-dot"></span>
+      <span id="status-text">Comprobando servidor...</span>
     </span>
     <span class="badge">🔒 Sin registro</span>
     <span class="badge">⚡ Alta velocidad</span>
@@ -679,6 +679,24 @@
   // ── UTILS ───────────────────────────────────────────────
   function $(id) { return document.getElementById(id); }
 
+  async function checkBackend() {
+    try {
+      const resp = await fetch(`${API_BASE}/health`, { priority: 'high' });
+      const data = await resp.json();
+      if (data.status === 'ok') {
+        $('status-text').textContent = 'Servidor activo';
+        $('status-dot').style.background = 'var(--accent-green)';
+        $('status-dot').style.animation = 'pulse-dot 1.5s ease-in-out infinite';
+        return true;
+      }
+    } catch (e) {
+      $('status-text').textContent = 'Backend inactivo (Ejecuta app.py)';
+      $('status-dot').style.background = '#ef4444';
+      $('status-dot').style.animation = 'none';
+      return false;
+    }
+  }
+
   function showToast(msg, icon = '✅') {
     $('toast-msg').textContent = msg;
     const t = $('toast');
@@ -751,6 +769,9 @@
 
     // Try REAL backend first
     try {
+      const isUp = await checkBackend();
+      if (!isUp) throw new Error('Offline');
+
       const resp = await fetchWithTimeout(`${API_BASE}/convert`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
@@ -797,7 +818,13 @@
     // Demo result
     const demoFilename = 'audio_demo.wav';
     $('dl-filename').textContent = demoFilename;
-    $('dl-size').textContent = 'Modo demo — conecta el backend para descarga real';
+    const isLocal = window.location.protocol === 'file:';
+    if (isLocal) {
+        $('dl-size').textContent = '⚠️ Abierto como archivo. Usa http://localhost:5000';
+    } else {
+        $('dl-size').textContent = 'Modo demo — El servidor no respondió.';
+    }
+    setStep(3);
     $('dl-link').href = '#';
     $('dl-link').onclick = (e) => {
       e.preventDefault();
@@ -901,6 +928,18 @@
     }
   });
 
+  // ── INIT ────────────────────────────────────────────────
+  window.addEventListener('DOMContentLoaded', () => {
+    checkBackend();
+    // Animación suave de entrada para la card
+    $('converter-card').style.opacity = '0';
+    $('converter-card').style.transform = 'translateY(20px)';
+    setTimeout(() => {
+      $('converter-card').style.transition = 'all 0.6s cubic-bezier(0.22, 1, 0.36, 1)';
+      $('converter-card').style.opacity = '1';
+      $('converter-card').style.transform = 'translateY(0)';
+    }, 100);
+  });
 </script>
 </body>
 </html>

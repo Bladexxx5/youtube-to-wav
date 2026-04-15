@@ -15,6 +15,7 @@ import shutil
 from pathlib import Path
 from flask import Flask, request, jsonify, send_file, make_response
 from flask_cors import CORS
+import traceback
 
 app = Flask(__name__, static_folder=".", static_url_path="")
 CORS(app)
@@ -131,11 +132,16 @@ def convert():
 
     try:
         result = subprocess.run(cmd, capture_output=True, text=True, timeout=180)
-        print("STDOUT:", result.stdout[:400])
-        print("STDERR:", result.stderr[:400])
+        # Sanitizar para evitar errores de consola en Windows
+        stdout_safe = result.stdout[:400].encode('ascii', 'ignore').decode()
+        stderr_safe = result.stderr[:400].encode('ascii', 'ignore').decode()
+        print(f"STDOUT: {stdout_safe}")
+        print(f"STDERR: {stderr_safe}")
 
         if result.returncode != 0:
             err = (result.stderr or result.stdout or "Error desconocido")[-600:]
+            err_safe = err.encode('ascii', 'ignore').decode()
+            print(f"ERROR yt-dlp: {err_safe}")
             return jsonify({"status": "error", "error": err}), 500
 
         wav_files = sorted(
@@ -144,7 +150,11 @@ def convert():
             reverse=True
         )
         if not wav_files:
-            print("Archivos en downloads:", list(DOWNLOADS_DIR.iterdir()))
+            try:
+                files = [f.name for f in DOWNLOADS_DIR.iterdir()]
+                print(f"Archivos en downloads: {str(files).encode('ascii', 'ignore').decode()}")
+            except:
+                pass
             return jsonify({"status": "error", "error": "WAV no generado"}), 500
 
         final = wav_files[0]
@@ -177,7 +187,16 @@ def convert():
     except subprocess.TimeoutExpired:
         return jsonify({"status": "error", "error": "Tiempo agotado (3 min). El video es muy largo."}), 504
     except Exception as e:
+        print("!!! EXTREME ERROR IN /convert !!!")
+        traceback.print_exc()
         return jsonify({"status": "error", "error": str(e)}), 500
+
+
+@app.errorhandler(500)
+def internal_error(error):
+    print("!!! 500 INTERNAL SERVER ERROR !!!")
+    traceback.print_exc()
+    return jsonify({"status": "error", "error": "Internal Server Error"}), 500
 
 
 # ── /download/<filename> ───────────────────────────────────────────────────────
@@ -208,9 +227,12 @@ def health():
 
 # ── Main ───────────────────────────────────────────────────────────────────────
 if __name__ == "__main__":
-    port = int(os.environ.get("PORT", 5000))   # Railway usa PORT env var
-    print("=" * 55)
-    print(f"  WAVify -> http://localhost:{port}")
-    print(f"  FFmpeg: {FFMPEG_DIR or 'en PATH del sistema'}")
-    print("=" * 55)
-    app.run(host="0.0.0.0", port=port, debug=False)
+    # Render usa la variable de entorno PORT
+    port = int(os.environ.get("PORT", 5000))
+    print("\n" + "=" * 60)
+    print("  >>> WAVify Backend")
+    print(f"  >>> URL local: http://localhost:{port}")
+    print(f"  >>> FFmpeg: {FFMPEG_DIR or 'PATH del sistema'}")
+    print("=" * 60 + "\n")
+    # debug=False para producción (Render)
+    app.run(host="0.0.0.0", port=port, debug=True)
