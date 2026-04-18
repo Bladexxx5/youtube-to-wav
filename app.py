@@ -250,7 +250,7 @@ def download(filename):
 # ── /health ────────────────────────────────────────────────────────────────────
 @app.route("/health")
 def health():
-    return jsonify({"status": "ok", "ffmpeg": FFMPEG_DIR or shutil.which("ffmpeg") or "no encontrado"})
+    return jsonify({"status": "ok", "v": "6", "ffmpeg": FFMPEG_DIR or shutil.which("ffmpeg") or "no encontrado"})
 
 
 # ── Main ───────────────────────────────────────────────────────────────────────
