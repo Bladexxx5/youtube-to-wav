@@ -8,6 +8,8 @@ import os
 import re
 import sys
 import uuid
+import base64
+import tempfile
 import threading
 import time
 import subprocess
@@ -22,6 +24,29 @@ CORS(app)
 
 DOWNLOADS_DIR = Path("downloads")
 DOWNLOADS_DIR.mkdir(exist_ok=True)
+
+# ── Cookies de YouTube (para evitar bloqueo de bot en producción) ─────────────
+COOKIES_FILE = None
+
+def setup_cookies():
+    global COOKIES_FILE
+    cookies_b64 = os.environ.get("YOUTUBE_COOKIES_B64", "")
+    if cookies_b64:
+        try:
+            cookies_data = base64.b64decode(cookies_b64).decode("utf-8")
+            tmp = tempfile.NamedTemporaryFile(
+                mode="w", suffix=".txt", delete=False, encoding="utf-8"
+            )
+            tmp.write(cookies_data)
+            tmp.close()
+            COOKIES_FILE = tmp.name
+            print(f"  Cookies: cargadas desde YOUTUBE_COOKIES_B64 → {COOKIES_FILE}")
+        except Exception as e:
+            print(f"  Cookies: error al cargar ({e})")
+    else:
+        print("  Cookies: YOUTUBE_COOKIES_B64 no configurada (solo funciona local)")
+
+setup_cookies()
 
 # ── Detectar FFmpeg (local + Railway) ─────────────────────────────────────────
 def find_ffmpeg():
@@ -78,6 +103,8 @@ def get_video_title(url: str) -> str:
     try:
         cmd = [sys.executable, "-m", "yt_dlp", "--no-playlist",
                "--get-title", "--no-warnings", url]
+        if COOKIES_FILE:
+            cmd += ["--cookies", COOKIES_FILE]
         result = subprocess.run(cmd, capture_output=True, text=True, timeout=20)
         title = result.stdout.strip().split("\n")[0]
         return title if title else "audio"
@@ -126,9 +153,10 @@ def convert():
         "-o", out_tmpl,
         url,
     ]
-    # Añadir --ffmpeg-location solo si tenemos una ruta específica
     if ffmpeg_dir:
         cmd += ["--ffmpeg-location", ffmpeg_dir]
+    if COOKIES_FILE:
+        cmd += ["--cookies", COOKIES_FILE]
 
     try:
         result = subprocess.run(cmd, capture_output=True, text=True, timeout=180)
