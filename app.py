@@ -146,6 +146,7 @@ def convert():
     cmd = [
         sys.executable, "-m", "yt_dlp",
         "--no-playlist",
+        "--format", "bestaudio/best",
         "-x",
         "--audio-format", "wav",
         "--no-warnings",
