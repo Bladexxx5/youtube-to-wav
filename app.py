@@ -125,7 +125,8 @@ def yt_dlp_base_flags():
     flags = [
         "--no-playlist",
         "--no-warnings",
-        "--extractor-args", "youtube:player_client=web,default",
+        # tv_embedded y web_embedded no requieren auth y evitan el bloqueo de bot
+        "--extractor-args", "youtube:player_client=tv_embedded,web_embedded,web",
     ]
     if COOKIES_FILE and Path(COOKIES_FILE).exists():
         flags += ["--cookies", COOKIES_FILE]
@@ -264,7 +265,7 @@ def download(filename):
 def health():
     return jsonify({
         "status":       "ok",
-        "v":            "7",
+        "v":            "8",
         "ffmpeg":       FFMPEG_DIR or shutil.which("ffmpeg") or "no encontrado",
         "cookies":      "ok" if (COOKIES_FILE and Path(COOKIES_FILE).exists()) else "no",
         "cookies_lines": COOKIES_LINES,
