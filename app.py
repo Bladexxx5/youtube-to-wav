@@ -148,7 +148,6 @@ def convert():
         "--no-playlist",
         "-x",
         "--audio-format", "wav",
-        "--audio-quality", f"{quality}K",
         "--no-warnings",
         "-o", out_tmpl,
         url,
