@@ -782,17 +782,21 @@
     try {
       $('status-msg').textContent = '⏳ Conectando con el servidor...';
       $('status-msg').className = 'status-msg';
-      const isUp = await checkBackend();
-      if (!isUp) throw new Error('Offline');
-      $('status-msg').textContent = '⚙️ Descargando y convirtiendo...';
 
+      // Intentar conversión directamente (sin pre-check) con timeout extendido
+      // para aguantar el cold start de Render (~30-60s)
       const resp = await fetchWithTimeout(`${API_BASE}/convert`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ url: urlVal, quality }),
-      }, 90000);
+      }, 120000); // 2 minutos
 
-      if (!resp.ok) throw new Error('Backend error');
+      $('status-msg').textContent = '⚙️ Procesando audio...';
+
+      if (!resp.ok) {
+        const errData = await resp.json().catch(() => ({}));
+        throw new Error(errData.error || `Error del servidor (${resp.status})`);
+      }
 
       const data = await resp.json();
       if (data.status === 'ok') {
@@ -803,9 +807,16 @@
       throw new Error(data.error || 'Error desconocido');
 
     } catch (e) {
-      // Fallback: demo mode
-      console.warn('Backend no disponible, modo demo:', e.message);
-      await runDemoMode();
+      console.warn('Error en conversión:', e.message);
+      $('status-msg').textContent = `❌ ${e.message}`;
+      $('status-msg').className = 'status-msg error-msg';
+      const btn = $('cta-btn');
+      btn.disabled = false;
+      $('btn-text').textContent = 'Convertir a WAV';
+      $('btn-icon').style.display = '';
+      $('progress-wrap').style.display = 'none';
+      setStep(1);
+      return;
     }
   }
 
