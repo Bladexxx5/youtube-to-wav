@@ -679,22 +679,33 @@
   // ── UTILS ───────────────────────────────────────────────
   function $(id) { return document.getElementById(id); }
 
-  async function checkBackend() {
-    try {
-      const resp = await fetch(`${API_BASE}/health`, { priority: 'high' });
-      const data = await resp.json();
-      if (data.status === 'ok') {
-        $('status-text').textContent = 'Servidor activo';
-        $('status-dot').style.background = 'var(--accent-green)';
-        $('status-dot').style.animation = 'pulse-dot 1.5s ease-in-out infinite';
-        return true;
+  async function checkBackend({ silent = false } = {}) {
+    const attempts = 3;
+    const timeoutMs = 25000; // 25s por intento → hasta 75s total (Render cold start)
+    for (let i = 0; i < attempts; i++) {
+      try {
+        if (!silent && i > 0) {
+          $('status-text').textContent = `Despertando servidor... (${i}/${attempts})`;
+        }
+        const ctrl = new AbortController();
+        const timer = setTimeout(() => ctrl.abort(), timeoutMs);
+        const resp = await fetch(`${API_BASE}/health`, { signal: ctrl.signal });
+        clearTimeout(timer);
+        const data = await resp.json();
+        if (data.status === 'ok') {
+          $('status-text').textContent = 'Servidor activo';
+          $('status-dot').style.background = 'var(--accent-green)';
+          $('status-dot').style.animation = 'pulse-dot 1.5s ease-in-out infinite';
+          return true;
+        }
+      } catch (e) {
+        if (i < attempts - 1) await new Promise(r => setTimeout(r, 2000));
       }
-    } catch (e) {
-      $('status-text').textContent = 'Backend inactivo (Ejecuta app.py)';
-      $('status-dot').style.background = '#ef4444';
-      $('status-dot').style.animation = 'none';
-      return false;
     }
+    $('status-text').textContent = 'Servidor no disponible';
+    $('status-dot').style.background = '#ef4444';
+    $('status-dot').style.animation = 'none';
+    return false;
   }
 
   function showToast(msg, icon = '✅') {
@@ -769,8 +780,11 @@
 
     // Try REAL backend first
     try {
+      $('status-msg').textContent = '⏳ Conectando con el servidor...';
+      $('status-msg').className = 'status-msg';
       const isUp = await checkBackend();
       if (!isUp) throw new Error('Offline');
+      $('status-msg').textContent = '⚙️ Descargando y convirtiendo...';
 
       const resp = await fetchWithTimeout(`${API_BASE}/convert`, {
         method: 'POST',
