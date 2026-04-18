@@ -25,35 +25,61 @@ CORS(app)
 DOWNLOADS_DIR = Path("downloads")
 DOWNLOADS_DIR.mkdir(exist_ok=True)
 
-# ── Cookies de YouTube (para evitar bloqueo de bot en producción) ─────────────
+# ── Cookies de YouTube ────────────────────────────────────────────────────────
 COOKIES_FILE = None
+COOKIES_LINES = 0
 
 def setup_cookies():
-    global COOKIES_FILE
+    global COOKIES_FILE, COOKIES_LINES
     cookies_b64 = os.environ.get("YOUTUBE_COOKIES_B64", "")
-    if cookies_b64:
-        try:
-            cookies_data = base64.b64decode(cookies_b64).decode("utf-8")
-            tmp = tempfile.NamedTemporaryFile(
-                mode="w", suffix=".txt", delete=False, encoding="utf-8"
-            )
-            tmp.write(cookies_data)
-            tmp.close()
-            COOKIES_FILE = tmp.name
-            print(f"  Cookies: cargadas desde YOUTUBE_COOKIES_B64 → {COOKIES_FILE}")
-        except Exception as e:
-            print(f"  Cookies: error al cargar ({e})")
-    else:
-        print("  Cookies: YOUTUBE_COOKIES_B64 no configurada (solo funciona local)")
+    if not cookies_b64:
+        print("  Cookies: YOUTUBE_COOKIES_B64 no configurada")
+        return
+    try:
+        cookies_data = base64.b64decode(cookies_b64).decode("utf-8")
+        tmp = tempfile.NamedTemporaryFile(
+            mode="w", suffix=".txt", delete=False, encoding="utf-8"
+        )
+        tmp.write(cookies_data)
+        tmp.close()
+        COOKIES_FILE  = tmp.name
+        COOKIES_LINES = sum(1 for l in cookies_data.splitlines() if l and not l.startswith("#"))
+        print(f"  Cookies: {COOKIES_LINES} entradas cargadas → {COOKIES_FILE}")
+    except Exception as e:
+        print(f"  Cookies: ERROR al cargar – {e}")
 
 setup_cookies()
 
-# ── Detectar FFmpeg (local + Railway) ─────────────────────────────────────────
+# ── Endpoint para actualizar cookies sin redeployar ───────────────────────────
+@app.route("/update-cookies", methods=["POST"])
+def update_cookies():
+    secret = os.environ.get("ADMIN_SECRET", "")
+    data   = request.get_json(force=True)
+    if not secret or data.get("secret") != secret:
+        return jsonify({"error": "No autorizado"}), 403
+    b64 = data.get("cookies_b64", "")
+    if not b64:
+        return jsonify({"error": "cookies_b64 requerido"}), 400
+    try:
+        cookies_data = base64.b64decode(b64).decode("utf-8")
+        global COOKIES_FILE, COOKIES_LINES
+        if COOKIES_FILE and Path(COOKIES_FILE).exists():
+            Path(COOKIES_FILE).unlink()
+        tmp = tempfile.NamedTemporaryFile(
+            mode="w", suffix=".txt", delete=False, encoding="utf-8"
+        )
+        tmp.write(cookies_data)
+        tmp.close()
+        COOKIES_FILE  = tmp.name
+        COOKIES_LINES = sum(1 for l in cookies_data.splitlines() if l and not l.startswith("#"))
+        return jsonify({"status": "ok", "cookies_lines": COOKIES_LINES})
+    except Exception as e:
+        return jsonify({"error": str(e)}), 500
+
+# ── Detectar FFmpeg ───────────────────────────────────────────────────────────
 def find_ffmpeg():
-    # 1. En el PATH (Railway lo instala aquí vía Dockerfile/nixpacks)
     if shutil.which("ffmpeg"):
         return str(Path(shutil.which("ffmpeg")).parent)
-    # 2. Rutas locales de Windows
     WINDOWS_PATHS = [
         r"C:\Users\ttrac\AppData\Local\Microsoft\WinGet\Packages\Gyan.FFmpeg_Microsoft.Winget.Source_8wekyb3d8bbwe\ffmpeg-8.1-full_build\bin",
         r"C:\ProgramData\chocolatey\bin",
@@ -63,7 +89,6 @@ def find_ffmpeg():
     for p in WINDOWS_PATHS:
         if (Path(p) / "ffmpeg.exe").exists():
             return p
-    # 3. Buscar en WinGet packages
     winget_root = Path(r"C:\Users\ttrac\AppData\Local\Microsoft\WinGet\Packages")
     if winget_root.exists():
         for f in winget_root.rglob("ffmpeg.exe"):
@@ -71,10 +96,10 @@ def find_ffmpeg():
     return None
 
 FFMPEG_DIR = find_ffmpeg()
-print(f"  FFmpeg: {FFMPEG_DIR or 'NO ENCONTRADO – el servidor debe tenerlo en PATH'}")
+print(f"  FFmpeg: {FFMPEG_DIR or 'NO ENCONTRADO'}")
 
 
-# ── Limpieza automática (1 hora) ───────────────────────────────────────────────
+# ── Limpieza automática (1 hora) ──────────────────────────────────────────────
 def cleanup_old_files():
     while True:
         time.sleep(1800)
@@ -88,31 +113,37 @@ def cleanup_old_files():
 threading.Thread(target=cleanup_old_files, daemon=True).start()
 
 
-# ── Sanitizar nombre de archivo ────────────────────────────────────────────────
+# ── Sanitizar nombre de archivo ───────────────────────────────────────────────
 def safe_filename(title: str) -> str:
-    """Convierte el título del video en un nombre de archivo seguro."""
-    name = re.sub(r'[\\/*?:"<>|]', "", title)   # quitar chars inválidos
-    name = re.sub(r'\s+', "_", name.strip())     # espacios → guiones bajos
-    name = name[:80]                              # máximo 80 chars
-    return name or "audio"
+    name = re.sub(r'[\\/*?:"<>|]', "", title)
+    name = re.sub(r'\s+', "_", name.strip())
+    return (name[:80] or "audio")
 
 
-# ── Obtener título del video ───────────────────────────────────────────────────
+# ── Flags comunes de yt-dlp ───────────────────────────────────────────────────
+def yt_dlp_base_flags():
+    flags = [
+        "--no-playlist",
+        "--no-warnings",
+        "--extractor-args", "youtube:player_client=web,default",
+    ]
+    if COOKIES_FILE and Path(COOKIES_FILE).exists():
+        flags += ["--cookies", COOKIES_FILE]
+    return flags
+
+
+# ── Obtener título del video ──────────────────────────────────────────────────
 def get_video_title(url: str) -> str:
-    """Obtiene el título del video con yt-dlp sin descargarlo."""
     try:
-        cmd = [sys.executable, "-m", "yt_dlp", "--no-playlist",
-               "--get-title", "--no-warnings", url]
-        if COOKIES_FILE:
-            cmd += ["--cookies", COOKIES_FILE]
-        result = subprocess.run(cmd, capture_output=True, text=True, timeout=20)
+        cmd = [sys.executable, "-m", "yt_dlp"] + yt_dlp_base_flags() + ["--get-title", url]
+        result = subprocess.run(cmd, capture_output=True, text=True, timeout=30)
         title = result.stdout.strip().split("\n")[0]
         return title if title else "audio"
     except Exception:
         return "audio"
 
 
-# ── Servir el frontend ─────────────────────────────────────────────────────────
+# ── Servir el frontend ────────────────────────────────────────────────────────
 @app.route("/")
 def index():
     return send_file("index.html")
@@ -123,53 +154,42 @@ def index():
 def convert():
     data    = request.get_json(force=True)
     url     = data.get("url", "").strip()
-    quality = data.get("quality", "192")
 
     if not url:
         return jsonify({"status": "error", "error": "URL requerida"}), 400
     if "youtube.com" not in url and "youtu.be" not in url:
         return jsonify({"status": "error", "error": "Solo URLs de YouTube"}), 400
-    if quality not in ("128", "192", "256", "320"):
-        quality = "192"
 
     ffmpeg_dir = FFMPEG_DIR or ""
     if not ffmpeg_dir and not shutil.which("ffmpeg"):
         return jsonify({"status": "error", "error": "FFmpeg no instalado en el servidor"}), 500
 
-    # Obtener título para el nombre del archivo
     title    = get_video_title(url)
     basename = safe_filename(title)
     file_id  = uuid.uuid4().hex[:8]
     out_name = f"{basename}_{file_id}"
     out_tmpl = str(DOWNLOADS_DIR / f"{out_name}.%(ext)s")
 
-    cmd = [
-        sys.executable, "-m", "yt_dlp",
-        "--no-playlist",
+    cmd = [sys.executable, "-m", "yt_dlp"] + yt_dlp_base_flags() + [
         "--format", "bestaudio/best",
         "-x",
         "--audio-format", "wav",
-        "--no-warnings",
         "-o", out_tmpl,
         url,
     ]
     if ffmpeg_dir:
         cmd += ["--ffmpeg-location", ffmpeg_dir]
-    if COOKIES_FILE:
-        cmd += ["--cookies", COOKIES_FILE]
 
     try:
         result = subprocess.run(cmd, capture_output=True, text=True, timeout=180)
-        # Sanitizar para evitar errores de consola en Windows
-        stdout_safe = result.stdout[:400].encode('ascii', 'ignore').decode()
-        stderr_safe = result.stderr[:400].encode('ascii', 'ignore').decode()
+        stdout_safe = result.stdout[:500].encode("ascii", "ignore").decode()
+        stderr_safe = result.stderr[:500].encode("ascii", "ignore").decode()
         print(f"STDOUT: {stdout_safe}")
         print(f"STDERR: {stderr_safe}")
 
         if result.returncode != 0:
             err = (result.stderr or result.stdout or "Error desconocido")[-600:]
-            err_safe = err.encode('ascii', 'ignore').decode()
-            print(f"ERROR yt-dlp: {err_safe}")
+            print(f"ERROR yt-dlp: {err.encode('ascii','ignore').decode()}")
             return jsonify({"status": "error", "error": err}), 500
 
         wav_files = sorted(
@@ -178,16 +198,13 @@ def convert():
             reverse=True
         )
         if not wav_files:
-            try:
-                files = [f.name for f in DOWNLOADS_DIR.iterdir()]
-                print(f"Archivos en downloads: {str(files).encode('ascii', 'ignore').decode()}")
-            except:
-                pass
+            files = [f.name for f in DOWNLOADS_DIR.iterdir()]
+            print(f"Archivos en downloads: {str(files).encode('ascii','ignore').decode()}")
             return jsonify({"status": "error", "error": "WAV no generado"}), 500
 
         final = wav_files[0]
 
-        # Verificar header RIFF (WAV real)
+        # Verificar header RIFF
         with open(final, "rb") as f:
             header = f.read(4)
         if header != b"RIFF":
@@ -215,29 +232,24 @@ def convert():
     except subprocess.TimeoutExpired:
         return jsonify({"status": "error", "error": "Tiempo agotado (3 min). El video es muy largo."}), 504
     except Exception as e:
-        print("!!! EXTREME ERROR IN /convert !!!")
         traceback.print_exc()
         return jsonify({"status": "error", "error": str(e)}), 500
 
 
 @app.errorhandler(500)
 def internal_error(error):
-    print("!!! 500 INTERNAL SERVER ERROR !!!")
     traceback.print_exc()
     return jsonify({"status": "error", "error": "Internal Server Error"}), 500
 
 
-# ── /download/<filename> ───────────────────────────────────────────────────────
+# ── /download/<filename> ──────────────────────────────────────────────────────
 @app.route("/download/<filename>")
 def download(filename):
     safe_name = Path(filename).name
     safe      = DOWNLOADS_DIR / safe_name
-
     if not safe.exists() or not safe.is_file():
         return jsonify({"error": "Archivo no encontrado"}), 404
-
     dl_name = safe_name if safe_name.lower().endswith(".wav") else safe_name.rsplit(".", 1)[0] + ".wav"
-
     response = make_response(send_file(
         safe, mimetype="audio/wav", as_attachment=True, download_name=dl_name,
     ))
@@ -247,20 +259,24 @@ def download(filename):
     return response
 
 
-# ── /health ────────────────────────────────────────────────────────────────────
+# ── /health ───────────────────────────────────────────────────────────────────
 @app.route("/health")
 def health():
-    return jsonify({"status": "ok", "v": "6", "ffmpeg": FFMPEG_DIR or shutil.which("ffmpeg") or "no encontrado"})
+    return jsonify({
+        "status":       "ok",
+        "v":            "7",
+        "ffmpeg":       FFMPEG_DIR or shutil.which("ffmpeg") or "no encontrado",
+        "cookies":      "ok" if (COOKIES_FILE and Path(COOKIES_FILE).exists()) else "no",
+        "cookies_lines": COOKIES_LINES,
+    })
 
 
-# ── Main ───────────────────────────────────────────────────────────────────────
+# ── Main ──────────────────────────────────────────────────────────────────────
 if __name__ == "__main__":
-    # Render usa la variable de entorno PORT
     port = int(os.environ.get("PORT", 5000))
     print("\n" + "=" * 60)
     print("  >>> WAVify Backend")
     print(f"  >>> URL local: http://localhost:{port}")
     print(f"  >>> FFmpeg: {FFMPEG_DIR or 'PATH del sistema'}")
     print("=" * 60 + "\n")
-    # debug=False para producción (Render)
     app.run(host="0.0.0.0", port=port, debug=True)
