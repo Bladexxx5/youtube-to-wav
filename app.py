@@ -125,11 +125,14 @@ def yt_dlp_base_flags():
     flags = [
         "--no-playlist",
         "--no-warnings",
-        # tv_embedded y web_embedded no requieren auth y evitan el bloqueo de bot
-        "--extractor-args", "youtube:player_client=tv_embedded,web_embedded,web",
+        "--extractor-args", "youtube:player_client=ios,web,default",
     ]
     if COOKIES_FILE and Path(COOKIES_FILE).exists():
         flags += ["--cookies", COOKIES_FILE]
+    # OAuth2 token como alternativa más robusta a cookies
+    oauth2_token = os.environ.get("YOUTUBE_OAUTH2_TOKEN", "")
+    if oauth2_token:
+        flags += ["--username", "oauth2", "--password", oauth2_token]
     return flags
 
 
@@ -265,7 +268,7 @@ def download(filename):
 def health():
     return jsonify({
         "status":       "ok",
-        "v":            "8",
+        "v":            "9",
         "ffmpeg":       FFMPEG_DIR or shutil.which("ffmpeg") or "no encontrado",
         "cookies":      "ok" if (COOKIES_FILE and Path(COOKIES_FILE).exists()) else "no",
         "cookies_lines": COOKIES_LINES,
