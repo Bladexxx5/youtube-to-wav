@@ -1,7 +1,8 @@
 """
 WAVify – Backend Flask
-Inicia local:  python app.py  → http://localhost:5000
-En producción: gunicorn + Render/Railway/Fly.io
+Modos:
+  - LOCAL: python app.py → http://localhost:5000 (descarga real con IP residencial)
+  - RENDER: gunicorn → proxy al backend local cuando está registrado
 """
 
 import os
@@ -15,15 +16,19 @@ import time
 import subprocess
 import shutil
 from pathlib import Path
-from flask import Flask, request, jsonify, send_file, make_response
+from flask import Flask, request, jsonify, send_file, make_response, Response
 from flask_cors import CORS
 import traceback
+import requests as req
 
 app = Flask(__name__, static_folder=".", static_url_path="")
 CORS(app)
 
 DOWNLOADS_DIR = Path("downloads")
 DOWNLOADS_DIR.mkdir(exist_ok=True)
+
+# ── Backend local registrado (proxy mode) ─────────────────────────────────────
+_remote = {"url": None}   # {"url": "https://xxx.trycloudflare.com"} cuando PC está online
 
 # ── Cookies de YouTube ────────────────────────────────────────────────────────
 COOKIES_FILE  = None
@@ -33,27 +38,23 @@ def setup_cookies():
     global COOKIES_FILE, COOKIES_LINES
     b64 = os.environ.get("YOUTUBE_COOKIES_B64", "")
     if not b64:
-        print("  Cookies: YOUTUBE_COOKIES_B64 no configurada")
         return
     try:
         data = base64.b64decode(b64).decode("utf-8")
         tmp  = tempfile.NamedTemporaryFile(mode="w", suffix=".txt", delete=False, encoding="utf-8")
-        tmp.write(data)
-        tmp.close()
+        tmp.write(data); tmp.close()
         COOKIES_FILE  = tmp.name
         COOKIES_LINES = sum(1 for l in data.splitlines() if l and not l.startswith("#"))
-        print(f"  Cookies: {COOKIES_LINES} entradas → {COOKIES_FILE}")
+        print(f"  Cookies: {COOKIES_LINES} entradas")
     except Exception as e:
         print(f"  Cookies: ERROR – {e}")
 
 setup_cookies()
 
-# ── Proxy residencial (evita bloqueo de IP de datacenter) ────────────────────
-PROXY_URL = os.environ.get("PROXY_URL", "")  # ej: http://user:pass@host:port
+# ── Proxy URL ─────────────────────────────────────────────────────────────────
+PROXY_URL = os.environ.get("PROXY_URL", "")
 if PROXY_URL:
-    print(f"  Proxy: {PROXY_URL.split('@')[-1]}")  # loguear solo host:port
-else:
-    print("  Proxy: no configurado")
+    print(f"  Proxy: {PROXY_URL.split('@')[-1]}")
 
 # ── Detectar FFmpeg ───────────────────────────────────────────────────────────
 def find_ffmpeg():
@@ -97,8 +98,7 @@ def extract_video_id(url: str):
     for pat in [r'(?:youtube\.com/watch\?v=|youtu\.be/)([a-zA-Z0-9_-]{11})',
                 r'youtube\.com/shorts/([a-zA-Z0-9_-]{11})']:
         m = re.search(pat, url)
-        if m:
-            return m.group(1)
+        if m: return m.group(1)
     return None
 
 def yt_dlp_flags():
@@ -113,60 +113,48 @@ def yt_dlp_flags():
 def ffmpeg_exe():
     return shutil.which("ffmpeg") or (str(Path(FFMPEG_DIR) / "ffmpeg.exe") if FFMPEG_DIR else None)
 
-# ── pytubefix fallback ────────────────────────────────────────────────────────
-def download_via_pytubefix(url: str, out_dir: Path) -> tuple[str, Path]:
-    """Descarga audio via pytubefix (InnerTube API) y devuelve (titulo, archivo)."""
-    from pytubefix import YouTube
-    from pytubefix.cli import on_progress
-
-    proxies = {"http": PROXY_URL, "https": PROXY_URL} if PROXY_URL else {}
-    yt      = YouTube(url, on_progress_callback=on_progress,
-                      use_po_token=False, proxies=proxies)
-    title   = yt.title
-
-    stream = (yt.streams.filter(only_audio=True).order_by("abr").last()
-              or yt.streams.filter(progressive=True).order_by("resolution").last())
-    if not stream:
-        raise RuntimeError("pytubefix: no se encontró stream de audio")
-
-    out_file = Path(stream.download(output_path=str(out_dir),
-                                    filename=f"ptx_{uuid.uuid4().hex[:8]}"))
-    return title, out_file
-
 def convert_to_wav(src: Path, ffmpeg: str) -> Path:
-    """Convierte cualquier audio a WAV 44100 Hz stereo."""
     out = src.with_suffix(".wav")
-    subprocess.run(
-        [ffmpeg, "-y", "-i", str(src), "-ar", "44100", "-ac", "2", str(out)],
-        capture_output=True, timeout=120, check=True
-    )
+    subprocess.run([ffmpeg, "-y", "-i", str(src), "-ar", "44100", "-ac", "2", str(out)],
+                   capture_output=True, timeout=120, check=True)
     try: src.unlink()
     except Exception: pass
     return out
 
-# ── /update-cookies ───────────────────────────────────────────────────────────
-@app.route("/update-cookies", methods=["POST"])
-def update_cookies():
+def download_via_pytubefix(url: str, out_dir: Path) -> tuple:
+    from pytubefix import YouTube
+    proxies = {"http": PROXY_URL, "https": PROXY_URL} if PROXY_URL else {}
+    yt      = YouTube(url, use_po_token=False, proxies=proxies)
+    title   = yt.title
+    stream  = (yt.streams.filter(only_audio=True).order_by("abr").last()
+               or yt.streams.filter(progressive=True).order_by("resolution").last())
+    if not stream:
+        raise RuntimeError("No stream de audio disponible")
+    out_file = Path(stream.download(output_path=str(out_dir),
+                                    filename=f"ptx_{uuid.uuid4().hex[:8]}"))
+    return title, out_file
+
+# ── /register-backend  (llamado por el script de tu PC) ──────────────────────
+@app.route("/register-backend", methods=["POST"])
+def register_backend():
     secret = os.environ.get("ADMIN_SECRET", "")
     data   = request.get_json(force=True)
     if not secret or data.get("secret") != secret:
         return jsonify({"error": "No autorizado"}), 403
-    b64 = data.get("cookies_b64", "")
-    if not b64:
-        return jsonify({"error": "cookies_b64 requerido"}), 400
-    try:
-        global COOKIES_FILE, COOKIES_LINES
-        raw = base64.b64decode(b64).decode("utf-8")
-        if COOKIES_FILE and Path(COOKIES_FILE).exists():
-            Path(COOKIES_FILE).unlink()
-        tmp = tempfile.NamedTemporaryFile(mode="w", suffix=".txt", delete=False, encoding="utf-8")
-        tmp.write(raw)
-        tmp.close()
-        COOKIES_FILE  = tmp.name
-        COOKIES_LINES = sum(1 for l in raw.splitlines() if l and not l.startswith("#"))
-        return jsonify({"status": "ok", "cookies_lines": COOKIES_LINES})
-    except Exception as e:
-        return jsonify({"error": str(e)}), 500
+    url = data.get("url", "").rstrip("/")
+    _remote["url"] = url
+    print(f"  [PROXY] Backend local registrado: {url}")
+    return jsonify({"status": "ok", "backend": url})
+
+@app.route("/unregister-backend", methods=["POST"])
+def unregister_backend():
+    secret = os.environ.get("ADMIN_SECRET", "")
+    data   = request.get_json(force=True)
+    if not secret or data.get("secret") != secret:
+        return jsonify({"error": "No autorizado"}), 403
+    _remote["url"] = None
+    print("  [PROXY] Backend local desconectado")
+    return jsonify({"status": "ok"})
 
 # ── Frontend ──────────────────────────────────────────────────────────────────
 @app.route("/")
@@ -176,6 +164,17 @@ def index():
 # ── /convert ──────────────────────────────────────────────────────────────────
 @app.route("/convert", methods=["POST"])
 def convert():
+    # ── Modo proxy: redirigir al backend local ────────────────────────────────
+    rb = _remote["url"]
+    if rb:
+        try:
+            r = req.post(f"{rb}/convert", json=request.get_json(force=True), timeout=190)
+            return jsonify(r.json()), r.status_code
+        except Exception as e:
+            _remote["url"] = None   # marcar como caído
+            return jsonify({"status": "error", "error": f"Tu PC se desconectó: {e}"}), 503
+
+    # ── Modo nube: intentar descarga directa ──────────────────────────────────
     data = request.get_json(force=True)
     url  = data.get("url", "").strip()
 
@@ -190,35 +189,26 @@ def convert():
 
     video_id = extract_video_id(url)
     file_id  = uuid.uuid4().hex[:8]
-
-    # ── Intento 1: yt-dlp ────────────────────────────────────────────────────
     title    = "audio"
     wav_file = None
     ytdlp_ok = False
 
     try:
-        # Título
         cmd_title = [sys.executable, "-m", "yt_dlp"] + yt_dlp_flags() + ["--get-title", url]
         r = subprocess.run(cmd_title, capture_output=True, text=True, timeout=30)
-        title_raw = r.stdout.strip().split("\n")[0]
-        if title_raw:
-            title = title_raw
+        t = r.stdout.strip().split("\n")[0]
+        if t: title = t
 
         out_name = f"{safe_filename(title)}_{file_id}"
         out_tmpl = str(DOWNLOADS_DIR / f"{out_name}.%(ext)s")
-
         cmd = [sys.executable, "-m", "yt_dlp"] + yt_dlp_flags() + [
-            "--format", "bestaudio/best",
-            "-x", "--audio-format", "wav",
+            "--format", "bestaudio/best", "-x", "--audio-format", "wav",
             "-o", out_tmpl, url,
         ]
         if FFMPEG_DIR:
             cmd += ["--ffmpeg-location", FFMPEG_DIR]
 
         result = subprocess.run(cmd, capture_output=True, text=True, timeout=180)
-        print("yt-dlp STDOUT:", result.stdout[:300].encode("ascii","ignore").decode())
-        print("yt-dlp STDERR:", result.stderr[:300].encode("ascii","ignore").decode())
-
         if result.returncode == 0:
             wavs = sorted(DOWNLOADS_DIR.glob(f"{out_name}*.wav"),
                           key=lambda x: x.stat().st_mtime, reverse=True)
@@ -228,9 +218,7 @@ def convert():
 
         if not ytdlp_ok:
             err_lower = (result.stderr + result.stdout).lower()
-            if "sign in" in err_lower or "bot" in err_lower:
-                print("  yt-dlp bloqueado → intentando Invidious")
-            else:
+            if "sign in" not in err_lower and "bot" not in err_lower:
                 err = (result.stderr or result.stdout or "Error desconocido")[-600:]
                 return jsonify({"status": "error", "error": err}), 500
 
@@ -240,7 +228,6 @@ def convert():
         traceback.print_exc()
         return jsonify({"status": "error", "error": str(e)}), 500
 
-    # ── Intento 2: Invidious ──────────────────────────────────────────────────
     if not ytdlp_ok:
         if not video_id:
             return jsonify({"status": "error", "error": "No se pudo extraer el ID del video"}), 400
@@ -249,36 +236,42 @@ def convert():
             wav_file = convert_to_wav(raw_file, ffmpeg)
         except Exception as e:
             traceback.print_exc()
-            return jsonify({"status": "error", "error": f"Invidious falló: {e}"}), 500
+            return jsonify({"status": "error",
+                            "error": "Tu PC no está conectada. Enciéndela para usar el convertidor."}), 503
 
-    # ── Verificar WAV ─────────────────────────────────────────────────────────
     with open(wav_file, "rb") as f:
         header = f.read(4)
     if header != b"RIFF":
-        try:
-            fixed = convert_to_wav(wav_file, ffmpeg)
-            wav_file = fixed
+        try: wav_file = convert_to_wav(wav_file, ffmpeg)
         except Exception as e:
             return jsonify({"status": "error", "error": f"Conversión WAV falló: {e}"}), 500
 
-    return jsonify({
-        "status":   "ok",
-        "filename": wav_file.name,
-        "title":    title,
-        "size":     wav_file.stat().st_size,
-    })
+    return jsonify({"status": "ok", "filename": wav_file.name,
+                    "title": title, "size": wav_file.stat().st_size})
 
 # ── /download/<filename> ──────────────────────────────────────────────────────
 @app.route("/download/<filename>")
 def download(filename):
+    # Modo proxy
+    rb = _remote["url"]
+    if rb:
+        try:
+            r = req.get(f"{rb}/download/{Path(filename).name}", stream=True, timeout=120)
+            return Response(r.iter_content(8192),
+                            headers={k: v for k, v in r.headers.items()
+                                     if k.lower() in ("content-type","content-disposition","content-length")},
+                            status=r.status_code)
+        except Exception as e:
+            return jsonify({"error": str(e)}), 503
+
     safe_name = Path(filename).name
     safe      = DOWNLOADS_DIR / safe_name
     if not safe.exists() or not safe.is_file():
         return jsonify({"error": "Archivo no encontrado"}), 404
     dl_name = safe_name if safe_name.lower().endswith(".wav") else safe_name.rsplit(".", 1)[0] + ".wav"
     resp = make_response(send_file(safe, mimetype="audio/wav", as_attachment=True, download_name=dl_name))
-    resp.headers["Content-Type"]        = "audio/wav"
-    resp.headers["Content-Disposition"] = f'attachment; filename="{dl_name}"'
+    resp.headers["Content-Type"]           = "audio/wav"
+    resp.headers["Content-Disposition"]    = f'attachment; filename="{dl_name}"'
     resp.headers["X-Content-Type-Options"] = "nosniff"
     return resp
 
@@ -286,12 +279,11 @@ def download(filename):
 @app.route("/health")
 def health():
     return jsonify({
-        "status":        "ok",
-        "v":             "12",
-        "proxy":         PROXY_URL.split("@")[-1] if PROXY_URL else "no",
-        "ffmpeg":        FFMPEG_DIR or shutil.which("ffmpeg") or "no encontrado",
-        "cookies":       "ok" if (COOKIES_FILE and Path(COOKIES_FILE).exists()) else "no",
-        "cookies_lines": COOKIES_LINES,
+        "status":         "ok",
+        "v":              "13",
+        "ffmpeg":         FFMPEG_DIR or shutil.which("ffmpeg") or "no",
+        "cookies":        "ok" if (COOKIES_FILE and Path(COOKIES_FILE).exists()) else "no",
+        "remote_backend": _remote["url"] or "no",
     })
 
 @app.errorhandler(500)
@@ -302,8 +294,5 @@ def internal_error(_error):
 # ── Main ──────────────────────────────────────────────────────────────────────
 if __name__ == "__main__":
     port = int(os.environ.get("PORT", 5000))
-    print("\n" + "=" * 60)
-    print(f"  WAVify  →  http://localhost:{port}")
-    print(f"  FFmpeg  →  {FFMPEG_DIR or 'PATH del sistema'}")
-    print("=" * 60 + "\n")
+    print(f"\n{'='*60}\n  WAVify  →  http://localhost:{port}\n{'='*60}\n")
     app.run(host="0.0.0.0", port=port, debug=True)
