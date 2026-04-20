@@ -14,7 +14,6 @@ import threading
 import time
 import subprocess
 import shutil
-import requests as req_lib
 from pathlib import Path
 from flask import Flask, request, jsonify, send_file, make_response
 from flask_cors import CORS
@@ -105,56 +104,23 @@ def yt_dlp_flags():
 def ffmpeg_exe():
     return shutil.which("ffmpeg") or (str(Path(FFMPEG_DIR) / "ffmpeg.exe") if FFMPEG_DIR else None)
 
-# ── Invidious fallback ────────────────────────────────────────────────────────
-INVIDIOUS_INSTANCES = [
-    "https://inv.tux.pizza",
-    "https://invidious.jing.rocks",
-    "https://yt.artemislena.eu",
-    "https://invidious.privacydev.net",
-    "https://invidious.nerdvpn.de",
-]
+# ── pytubefix fallback ────────────────────────────────────────────────────────
+def download_via_pytubefix(url: str, out_dir: Path) -> tuple[str, Path]:
+    """Descarga audio via pytubefix (InnerTube API) y devuelve (titulo, archivo)."""
+    from pytubefix import YouTube
+    from pytubefix.cli import on_progress
 
-def download_via_invidious(video_id: str, out_dir: Path) -> tuple[str, Path]:
-    """Descarga audio via Invidious API y devuelve (titulo, archivo)."""
-    last_err = "Sin instancias disponibles"
-    for instance in INVIDIOUS_INSTANCES:
-        try:
-            resp = req_lib.get(
-                f"{instance}/api/v1/videos/{video_id}",
-                timeout=15,
-                headers={"User-Agent": "Mozilla/5.0"}
-            )
-            if resp.status_code != 200:
-                continue
-            data  = resp.json()
-            title = data.get("title", "audio")
+    yt     = YouTube(url, on_progress_callback=on_progress, use_po_token=False)
+    title  = yt.title
 
-            # Preferir audio-only (adaptiveFormats)
-            audio_fmts = [f for f in data.get("adaptiveFormats", [])
-                          if f.get("type", "").startswith("audio/")]
-            if not audio_fmts:
-                audio_fmts = data.get("formatStreams", [])
-            if not audio_fmts:
-                continue
+    stream = (yt.streams.filter(only_audio=True).order_by("abr").last()
+              or yt.streams.filter(progressive=True).order_by("resolution").last())
+    if not stream:
+        raise RuntimeError("pytubefix: no se encontró stream de audio")
 
-            audio_fmts.sort(key=lambda x: int(x.get("bitrate", 0)), reverse=True)
-            audio_url = audio_fmts[0]["url"]
-            ext       = "webm" if "webm" in audio_fmts[0].get("type","") else "m4a"
-
-            raw_path = out_dir / f"inv_{video_id}_{uuid.uuid4().hex[:6]}.{ext}"
-            with req_lib.get(audio_url, stream=True, timeout=180,
-                             headers={"User-Agent": "Mozilla/5.0"}) as r:
-                r.raise_for_status()
-                with open(raw_path, "wb") as f:
-                    for chunk in r.iter_content(8192):
-                        f.write(chunk)
-
-            return title, raw_path
-        except Exception as e:
-            last_err = str(e)
-            print(f"  Invidious {instance} falló: {e}")
-            continue
-    raise RuntimeError(f"Invidious: todos fallaron. Último error: {last_err}")
+    out_file = Path(stream.download(output_path=str(out_dir),
+                                    filename=f"ptx_{uuid.uuid4().hex[:8]}"))
+    return title, out_file
 
 def convert_to_wav(src: Path, ffmpeg: str) -> Path:
     """Convierte cualquier audio a WAV 44100 Hz stereo."""
@@ -268,7 +234,7 @@ def convert():
         if not video_id:
             return jsonify({"status": "error", "error": "No se pudo extraer el ID del video"}), 400
         try:
-            title, raw_file = download_via_invidious(video_id, DOWNLOADS_DIR)
+            title, raw_file = download_via_pytubefix(url, DOWNLOADS_DIR)
             wav_file = convert_to_wav(raw_file, ffmpeg)
         except Exception as e:
             traceback.print_exc()
@@ -310,7 +276,7 @@ def download(filename):
 def health():
     return jsonify({
         "status":        "ok",
-        "v":             "10",
+        "v":             "11",
         "ffmpeg":        FFMPEG_DIR or shutil.which("ffmpeg") or "no encontrado",
         "cookies":       "ok" if (COOKIES_FILE and Path(COOKIES_FILE).exists()) else "no",
         "cookies_lines": COOKIES_LINES,
