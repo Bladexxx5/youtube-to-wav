@@ -48,6 +48,13 @@ def setup_cookies():
 
 setup_cookies()
 
+# ── Proxy residencial (evita bloqueo de IP de datacenter) ────────────────────
+PROXY_URL = os.environ.get("PROXY_URL", "")  # ej: http://user:pass@host:port
+if PROXY_URL:
+    print(f"  Proxy: {PROXY_URL.split('@')[-1]}")  # loguear solo host:port
+else:
+    print("  Proxy: no configurado")
+
 # ── Detectar FFmpeg ───────────────────────────────────────────────────────────
 def find_ffmpeg():
     if shutil.which("ffmpeg"):
@@ -99,6 +106,8 @@ def yt_dlp_flags():
              "--extractor-args", "youtube:player_client=ios,web,default"]
     if COOKIES_FILE and Path(COOKIES_FILE).exists():
         flags += ["--cookies", COOKIES_FILE]
+    if PROXY_URL:
+        flags += ["--proxy", PROXY_URL]
     return flags
 
 def ffmpeg_exe():
@@ -110,8 +119,10 @@ def download_via_pytubefix(url: str, out_dir: Path) -> tuple[str, Path]:
     from pytubefix import YouTube
     from pytubefix.cli import on_progress
 
-    yt     = YouTube(url, on_progress_callback=on_progress, use_po_token=False)
-    title  = yt.title
+    proxies = {"http": PROXY_URL, "https": PROXY_URL} if PROXY_URL else {}
+    yt      = YouTube(url, on_progress_callback=on_progress,
+                      use_po_token=False, proxies=proxies)
+    title   = yt.title
 
     stream = (yt.streams.filter(only_audio=True).order_by("abr").last()
               or yt.streams.filter(progressive=True).order_by("resolution").last())
@@ -276,7 +287,8 @@ def download(filename):
 def health():
     return jsonify({
         "status":        "ok",
-        "v":             "11",
+        "v":             "12",
+        "proxy":         PROXY_URL.split("@")[-1] if PROXY_URL else "no",
         "ffmpeg":        FFMPEG_DIR or shutil.which("ffmpeg") or "no encontrado",
         "cookies":       "ok" if (COOKIES_FILE and Path(COOKIES_FILE).exists()) else "no",
         "cookies_lines": COOKIES_LINES,
